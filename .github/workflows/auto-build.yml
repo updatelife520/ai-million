@@ -1,0 +1,52 @@
+name: auto-debug-deploy
+on:
+  repository_dispatch:
+    types: [build-space]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write code from notion
+        run: |
+          echo "${{ github.event.client_payload.code }}" > app.py
+          echo "${{ github.event.client_payload.req }}" > requirements.txt
+          cat > Dockerfile <<EOF
+          FROM python:3.10-slim
+          WORKDIR /app
+          COPY requirements.txt .
+          RUN pip install -r requirements.txt
+          COPY app.py .
+          CMD ["python","-u","app.py"]
+          EOF
+      - name: Login & Create HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SPACE_NAME: ${{ github.event.client_payload.name }}
+        run: |
+          pip install huggingface-hub
+          python -c "
+          from huggingface_hub import HfApi
+          api = HfApi(token='${{ secrets.HF_TOKEN }}')
+          api.create_repo(repo_id='${{ github.event.client_payload.name }}', repo_type='space', space_sdk='docker', private=False)
+          "
+      - name: Push to Space
+        run: |
+          git config --global user.name "bot"
+          git config --global user.email "bot@users.noreply.github.com"
+          git clone https://oauth:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/$(whoami)/${{ github.event.client_payload.name }} hf
+          cp app.py requirements.txt Dockerfile hf/
+          cd hf
+          git add .
+          git commit -m "auto build"
+          git push
+      - name: Wait & Check Running
+        run: |
+          for i in {1..5}; do
+            sleep 60
+            LOG=$(curl -s https://huggingface.co/spaces/$(whoami)/${{ github.event.client_payload.name }}/resolve/main/log.txt|head -30)
+            echo "$LOG"
+            grep -q "Running on local URL: http://0.0.0.0:7860" && exit 0
+          done
+          exit 1
